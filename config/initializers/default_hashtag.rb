@@ -2,5 +2,5 @@
 
 Rails.application.configure do
   config.x.default_hashtag = ENV['DEFAULT_HASHTAG']
-  config.x.default_hashtag_id = Tag.find_by(name: ENV['DEFAULT_HASHTAG'].downcase)
+  config.x.default_hashtag_id = !(ENV['KEYWORD_HASHTAG_VISIBILITY'].==('none'))
 end

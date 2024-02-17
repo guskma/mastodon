@@ -96,11 +96,9 @@ class User < ApplicationRecord
   accepts_nested_attributes_for :invite_request, reject_if: ->(attributes) { attributes['text'].blank? && !Setting.require_invite_text }
   validates :invite_request, presence: true, on: :create, if: :invite_text_required?
 
-  validates :locale, inclusion: I18n.available_locales.map(&:to_s), if: :locale?
   validates_with BlacklistedEmailValidator, if: -> { ENV['EMAIL_DOMAIN_LISTS_APPLY_AFTER_CONFIRMATION'] == 'true' || !confirmed? }
   validates_with EmailMxValidator, if: :validate_email_dns?
   validates :agreement, acceptance: { allow_nil: false, accept: [true, 'true', '1'] }, on: :create
-  validates :time_zone, inclusion: { in: ActiveSupport::TimeZone.all.map { |tz| tz.tzinfo.name } }, allow_blank: true
 
   # Honeypot/anti-spam fields
   attr_accessor :registration_form_time, :website, :confirm_password
@@ -124,6 +122,8 @@ class User < ApplicationRecord
 
   before_validation :sanitize_languages
   before_validation :sanitize_role
+  before_validation :sanitize_time_zone
+  before_validation :sanitize_locale
   before_create :set_approved
   after_commit :send_pending_devise_notifications
   after_create_commit :trigger_webhooks
@@ -360,6 +360,16 @@ class User < ApplicationRecord
     Doorkeeper::AccessToken.by_resource_owner(self).in_batches do |batch|
       batch.update_all(revoked_at: Time.now.utc)
       Web::PushSubscription.where(access_token_id: batch).delete_all
+
+      # Revoke each access token for the Streaming API, since `update_all``
+      # doesn't trigger ActiveRecord Callbacks:
+      # TODO: #28793 Combine into a single topic
+      payload = Oj.dump(event: :kill)
+      redis.pipelined do |pipeline|
+        batch.ids.each do |id|
+          pipeline.publish("timeline:access_token:#{id}", payload)
+        end
+      end
     end
   end
 
@@ -451,9 +461,15 @@ class User < ApplicationRecord
   end
 
   def sanitize_role
-    return if role.nil?
+    self.role = nil if role.present? && role.everyone?
+  end
 
-    self.role = nil if role.everyone?
+  def sanitize_time_zone
+    self.time_zone = nil if time_zone.present? && ActiveSupport::TimeZone[time_zone].nil?
+  end
+
+  def sanitize_locale
+    self.locale = nil if locale.present? && I18n.available_locales.exclude?(locale.to_sym)
   end
 
   def prepare_new_user!
